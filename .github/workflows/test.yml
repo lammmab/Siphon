@@ -40,7 +40,7 @@ jobs:
         run: cmake --build build
 
       - name: Test
-        run: ./build/test/test_ciso_gc && ./build/test/test_rarc
+        run: ctest --test-dir build/test --output-on-failure
 
       - name: Upload test results on failure
         if: failure()

@@ -10,10 +10,12 @@ add_test(
     WORKING_DIRECTORY ${SIPHON_TEST_WORKDIR}
 )
 
-add_executable(test_ciso_gc test_ciso_gc.c)
-target_link_libraries(test_ciso_gc PRIVATE siphon)
-add_test(
-    NAME    test_ciso_gc
-    COMMAND test_ciso_gc
-    WORKING_DIRECTORY ${SIPHON_TEST_WORKDIR}
-)
+macro(add_disc_test name)
+    add_executable(test_${name} test_${name}.c test_disc_common.c)
+    target_link_libraries(test_${name} PRIVATE siphon)
+    target_compile_definitions(test_${name} PRIVATE
+        SIPHON_TEST_ROOT="${CMAKE_SOURCE_DIR}")
+    add_test(NAME test_${name} COMMAND test_${name})
+endmacro()
+
+add_disc_test(ciso_gc)
