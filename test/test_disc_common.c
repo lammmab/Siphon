@@ -114,7 +114,7 @@ static int test_inspect_bad_file(const DiscTestConfig* cfg) {
     (void)cfg;
     SiphonDiscInfo info;
     SiphonError err = siphon_disc_inspect(
-        SIPHON_TEST_ROOT "/test/fixtures/mock/garbage.bin",
+        SIPHON_TEST_ROOT "/test/fixtures/disc/garbage.bin",
         &info, silent_log, NULL
     );
     if (err == SIPHON_OK) {
@@ -129,7 +129,7 @@ static int test_log_on_error(const DiscTestConfig* cfg) {
     LogCapture lc = {0};
     SiphonDiscInfo info;
     siphon_disc_inspect(
-        SIPHON_TEST_ROOT "/test/fixtures/mock/garbage.bin",
+        SIPHON_TEST_ROOT "/test/fixtures/disc/garbage.bin",
         &info, capture_log, &lc
     );
     if (lc.len == 0) {

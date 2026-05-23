@@ -18,4 +18,5 @@ macro(add_disc_test name)
     add_test(NAME test_${name} COMMAND test_${name})
 endmacro()
 
+add_disc_test(iso_gc)
 add_disc_test(ciso_gc)

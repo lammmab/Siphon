@@ -1,0 +1,6 @@
+*.iso filter=lfs diff=lfs merge=lfs -text
+*.ciso filter=lfs diff=lfs merge=lfs -text
+*.rvz filter=lfs diff=lfs merge=lfs -text
+*.gcz filter=lfs diff=lfs merge=lfs -text
+*.wia filter=lfs diff=lfs merge=lfs -text
+*.wbfs filter=lfs diff=lfs merge=lfs -text
