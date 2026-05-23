@@ -3,8 +3,8 @@
 
 int main(void) {
     DiscTestConfig cfg = {
-        .fixture              = SIPHON_TEST_ROOT "/test/fixtures/disc/gc/game.iso",
-        .extract_dir          = SIPHON_TEST_ROOT "/test/out/iso",
+        .fixture              = SIPHON_TEST_ROOT "/test/fixtures/disc/wii/game.iso",
+        .extract_dir          = SIPHON_TEST_ROOT "/test/out/iso_wii",
         .expected_format      = "ISO/GCM",
         .expected_game_id     = "TERRIF",
         .expected_entry_count = 1,

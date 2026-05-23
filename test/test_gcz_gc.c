@@ -3,9 +3,9 @@
 
 int main(void) {
     DiscTestConfig cfg = {
-        .fixture              = SIPHON_TEST_ROOT "/test/fixtures/disc/gc/game.iso",
-        .extract_dir          = SIPHON_TEST_ROOT "/test/out/iso",
-        .expected_format      = "ISO/GCM",
+        .fixture              = SIPHON_TEST_ROOT "/test/fixtures/disc/gc/game.gcz",
+        .extract_dir          = SIPHON_TEST_ROOT "/test/out/gcz_gc",
+        .expected_format      = "GCZ",
         .expected_game_id     = "TERRIF",
         .expected_entry_count = 1,
     };

@@ -51,6 +51,8 @@ add_library(gc_disc STATIC
     src/disc/gc_wia.c
     src/disc/gc_wbfs.c
     src/disc/gc_rvz.c
+    src/disc/aes.c
+    src/disc/gc_wii.c
 )
 
 target_include_directories(gc_disc PUBLIC include PRIVATE src/disc)

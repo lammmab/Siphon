@@ -67,6 +67,7 @@ GCDisc* gc_disc_open(const char* path) {
 void gc_disc_close(GCDisc* disc) {
     if (!disc) return;
     if (disc->close) disc->close(disc);
+    gc_wii_free(disc);
     gc_disc_free_parsed(disc);
     if (disc->file) fclose(disc->file);
     free(disc);
