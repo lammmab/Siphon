@@ -82,13 +82,5 @@ else()
 endif()
 
 if(SIPHON_BUILD_TESTS)
-    enable_testing()
-
-    add_executable(test_rarc test/test_rarc.c)
-    target_link_libraries(test_rarc PRIVATE gc_disc)
-    add_test(
-        NAME test_rarc
-        COMMAND test_rarc
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    )
+    add_subdirectory(test)
 endif()

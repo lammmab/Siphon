@@ -1,230 +1,218 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include "gc_disc.h"
-#include "macros.h"
+#include "siphon.h"
+#include <confluence/macros.h>
 
-/*
- * Build a minimal valid RARC blob in memory.
- *
- * Layout (all big-endian):
- *   0x0000  Header      (0x20)
- *   0x0020  FST info    (0x20)
- *   0x0040  Dir table   (1 dir  × 0x10 = 0x10)
- *   0x0050  File table  (4 entries × 0x14 = 0x50)
- *   0x00A0  String table ("ROOT\0.\0..\0file.bin\0" = 0x14)
- *   0x00B4  File data   (0x04)
- *   total   0x00B8
- *
- * 4 file-table entries:
- *   0 – "."        (self-ref dir)
- *   1 – ".."       (parent-ref dir)
- *   2 – root dir   (dir entry, points back to dir index 0)
- *   3 – file.bin   (file)
- */
+#define FIXTURE_ARC   "test/fixtures/minimal.arc"
+#define FIXTURE_INNER "tex/sw_rope.bti"
+#define EXTRACT_DIR   "test/out/rarc"
+#define COPY_OUT      "test/out/rarc_copy/sw_rope.bti"
+#define TMP_ARC       "test/out/rarc_tmp/minimal_tmp.arc"
+
+typedef struct { char buf[2048]; size_t len; } LogCapture;
+
+static void capture_log(void* userdata, const char* msg) {
+    LogCapture* lc = (LogCapture*)userdata;
+    size_t room = sizeof(lc->buf) - lc->len - 1;
+    if (!room) return;
+    size_t n = strlen(msg); if (n > room) n = room;
+    memcpy(lc->buf + lc->len, msg, n);
+    lc->len += n;
+    lc->buf[lc->len] = '\0';
+}
+static void silent_log(void* u, const char* m) { (void)u; (void)m; }
+
+static int file_exists(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f); return 1;
+}
+
+static long file_size(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END); long sz = ftell(f);
+    fclose(f); return sz;
+}
+
 static void wr32(unsigned char* p, unsigned int v) {
-    p[0] = (v >> 24) & 0xFF;
-    p[1] = (v >> 16) & 0xFF;
-    p[2] = (v >>  8) & 0xFF;
-    p[3] =  v        & 0xFF;
+    p[0]=(v>>24)&0xFF; p[1]=(v>>16)&0xFF; p[2]=(v>>8)&0xFF; p[3]=v&0xFF;
 }
 static void wr16(unsigned char* p, unsigned short v) {
-    p[0] = (v >> 8) & 0xFF;
-    p[1] =  v       & 0xFF;
+    p[0]=(v>>8)&0xFF; p[1]=v&0xFF;
 }
 
-static int build_minimal_rarc(unsigned char** out, size_t* out_size) {
-    /* offsets */
-    const unsigned int HDR      = 0x0000;
-    const unsigned int FST_INFO = 0x0020;
-    const unsigned int DIR_TBL  = 0x0040;
-    const unsigned int FILE_TBL = 0x0050;
-    const unsigned int STR_TBL  = 0x00A0;
-    const unsigned int DATA     = 0x00B4;
-    const unsigned int TOTAL    = 0x00B8;
-
-    /* string table layout: ROOT\0.\0..\0file.bin\0 */
-    const unsigned int STR_ROOT     = 0x00; /* "ROOT"     */
-    const unsigned int STR_DOT      = 0x05; /* "."        */
-    const unsigned int STR_DOTDOT   = 0x07; /* ".."       */
-    const unsigned int STR_FILE     = 0x0A; /* "file.bin" */
-    const unsigned int STR_LEN      = 0x14;
-
-    const unsigned int NUM_DIRS     = 1;
-    const unsigned int NUM_ENTRIES  = 4;
+static int write_minimal_rarc(const char* path) {
+    const unsigned int HDR=0,FST_INFO=0x20,DIR_TBL=0x40,FILE_TBL=0x50,
+                       STR_TBL=0xA0,DATA=0xB4,TOTAL=0xB8;
+    const unsigned int STR_ROOT=0,STR_DOT=5,STR_DOTDOT=7,STR_FILE=0xA,STR_LEN=0x14;
 
     unsigned char* buf = (unsigned char*)calloc(1, TOTAL);
     if (!buf) return -1;
 
-    /* ---- Header ---- */
-    memcpy(buf + HDR + 0x00, "RARC", 4);
-    wr32(buf + HDR + 0x04, TOTAL);           /* file size */
-    wr32(buf + HDR + 0x08, 0x20);            /* header size */
-    wr32(buf + HDR + 0x0C, DATA - 0x20);     /* data offset relative to end-of-header */
-    wr32(buf + HDR + 0x10, 0x04);            /* data length */
-    wr32(buf + HDR + 0x14, 0x04);            /* data length copy */
+    memcpy(buf+HDR,    "RARC", 4);
+    wr32(buf+HDR+0x04, TOTAL);
+    wr32(buf+HDR+0x08, 0x20);
+    wr32(buf+HDR+0x0C, DATA-0x20);
+    wr32(buf+HDR+0x10, 0x04);
+    wr32(buf+HDR+0x14, 0x04);
 
-    /* ---- FST info (at 0x20) ---- */
-    /* All offsets here are relative to FST info start (0x20). */
-    unsigned char* fst = buf + FST_INFO;
-    wr32(fst + 0x00, NUM_DIRS);
-    wr32(fst + 0x04, DIR_TBL  - FST_INFO);   /* dirs_offset  */
-    wr32(fst + 0x08, NUM_ENTRIES);
-    wr32(fst + 0x0C, FILE_TBL - FST_INFO);   /* files_offset */
-    wr32(fst + 0x10, STR_LEN);
-    wr32(fst + 0x14, STR_TBL  - FST_INFO);   /* string_table_offset */
-    wr16(fst + 0x18, 1);                      /* num_files_written (just the real file) */
+    unsigned char* fst = buf+FST_INFO;
+    wr32(fst+0x00, 1);
+    wr32(fst+0x04, DIR_TBL-FST_INFO);
+    wr32(fst+0x08, 4);
+    wr32(fst+0x0C, FILE_TBL-FST_INFO);
+    wr32(fst+0x10, STR_LEN);
+    wr32(fst+0x14, STR_TBL-FST_INFO);
+    wr16(fst+0x18, 1);
 
-    /* ---- Dir table (1 entry at 0x40) ---- */
-    unsigned char* dir = buf + DIR_TBL;
-    /* id = 0xFFFFFFFF (root), name_hash, ?, num_entries, first_entry_index */
-    wr32(dir + 0x00, 0xFFFFFFFF);
-    wr32(dir + 0x04, 0x52415243); /* hash placeholder */
-    wr16(dir + 0x08, STR_ROOT);
-    wr16(dir + 0x0A, NUM_ENTRIES);
-    wr32(dir + 0x0C, 0);           /* first_entry_index = 0 */
+    unsigned char* dir = buf+DIR_TBL;
+    wr32(dir+0x00, 0xFFFFFFFF);
+    wr32(dir+0x04, 0x52415243);
+    wr16(dir+0x08, STR_ROOT);
+    wr16(dir+0x0A, 4);
+    wr32(dir+0x0C, 0);
 
-    /* ---- File table (4 entries at 0x50, each 0x14 bytes) ---- */
-    unsigned char* fe = buf + FILE_TBL;
+    unsigned char* fe = buf+FILE_TBL;
+    wr16(fe+0x00,0xFFFF); wr16(fe+0x04,0x0200); wr16(fe+0x06,STR_DOT);   wr32(fe+0x08,0); fe+=0x14;
+    wr16(fe+0x00,0xFFFF); wr16(fe+0x04,0x0200); wr16(fe+0x06,STR_DOTDOT); wr32(fe+0x08,0xFFFFFFFF); fe+=0x14;
+    wr16(fe+0x00,0xFFFF); wr16(fe+0x04,0x0200); wr16(fe+0x06,STR_ROOT);  wr32(fe+0x08,0); fe+=0x14;
+    wr16(fe+0x00,0x0000); wr16(fe+0x04,0x1100); wr16(fe+0x06,STR_FILE);  wr32(fe+0x08,0); wr32(fe+0x0C,4);
 
-    /* entry 0: "." self-ref dir */
-    wr16(fe + 0x00, 0xFFFF);           /* id = dir */
-    wr16(fe + 0x02, 0x0000);
-    wr16(fe + 0x04, 0x0200);           /* type = dir */
-    wr16(fe + 0x06, STR_DOT);
-    wr32(fe + 0x08, 0);                /* data_offset = dir index 0 */
-    wr32(fe + 0x0C, 0);
-    fe += 0x14;
+    unsigned char* st = buf+STR_TBL;
+    memcpy(st+STR_ROOT,"ROOT",4);     st[STR_ROOT+4]='\0';
+    memcpy(st+STR_DOT,".",1);         st[STR_DOT+1]='\0';
+    memcpy(st+STR_DOTDOT,"..",2);     st[STR_DOTDOT+2]='\0';
+    memcpy(st+STR_FILE,"file.bin",8); st[STR_FILE+8]='\0';
 
-    /* entry 1: ".." parent-ref dir */
-    wr16(fe + 0x00, 0xFFFF);
-    wr16(fe + 0x02, 0x0000);
-    wr16(fe + 0x04, 0x0200);
-    wr16(fe + 0x06, STR_DOTDOT);
-    wr32(fe + 0x08, 0xFFFFFFFF);      /* no parent = -1 */
-    wr32(fe + 0x0C, 0);
-    fe += 0x14;
+    buf[DATA]=0xDE; buf[DATA+1]=0xAD; buf[DATA+2]=0xBE; buf[DATA+3]=0xEF;
 
-    /* entry 2: root dir entry (dir) */
-    wr16(fe + 0x00, 0xFFFF);
-    wr16(fe + 0x02, 0x0000);
-    wr16(fe + 0x04, 0x0200);
-    wr16(fe + 0x06, STR_ROOT);
-    wr32(fe + 0x08, 0);
-    wr32(fe + 0x0C, 0);
-    fe += 0x14;
-
-    /* entry 3: "file.bin" actual file */
-    wr16(fe + 0x00, 0x0000);           /* id = 0 */
-    wr16(fe + 0x02, 0x0000);
-    wr16(fe + 0x04, 0x1100);           /* type = file */
-    wr16(fe + 0x06, STR_FILE);
-    wr32(fe + 0x08, 0);                /* data_offset from data start */
-    wr32(fe + 0x0C, 4);               /* size */
-
-    /* ---- String table (at 0xA0) ---- */
-    unsigned char* st = buf + STR_TBL;
-    memcpy(st + STR_ROOT,   "ROOT",     4); st[STR_ROOT   + 4] = '\0';
-    memcpy(st + STR_DOT,    ".",        1); st[STR_DOT    + 1] = '\0';
-    memcpy(st + STR_DOTDOT, "..",       2); st[STR_DOTDOT + 2] = '\0';
-    memcpy(st + STR_FILE,   "file.bin", 8); st[STR_FILE   + 8] = '\0';
-
-    /* ---- File data (at 0xB4) ---- */
-    buf[DATA + 0] = 0xDE;
-    buf[DATA + 1] = 0xAD;
-    buf[DATA + 2] = 0xBE;
-    buf[DATA + 3] = 0xEF;
-
-    *out = buf;
-    *out_size = TOTAL;
-    return 0;
+    MKDIR_ONE("test/out"); MKDIR_ONE("test/out/rarc_tmp");
+    FILE* f = fopen(path, "wb");
+    if (!f) { free(buf); return -1; }
+    int ok = (fwrite(buf, 1, TOTAL, f) == TOTAL);
+    fclose(f); free(buf);
+    return ok ? 0 : -1;
 }
 
-static int test_walk_entries(void) {
-    unsigned char* buf = NULL; size_t sz = 0;
-    if (build_minimal_rarc(&buf, &sz) != 0) return 1;
-    GCArc* arc = gc_arc_open_mem(buf, sz);
-    if (!arc) { free(buf); return 1; }
-
-    int n = gc_arc_entry_count(arc);
-    int found_file = 0;
-    for (int i = 0; i < n; i++) {
-        const GCEntry* e = gc_arc_entry(arc, i);
-        if (!e || !e->name) continue;
-        if (e->type == GC_ENTRY_FILE && e->size > 0) found_file = 1;
+static int test_extract_ok(void) {
+    if (write_minimal_rarc(TMP_ARC) != 0) {
+        fprintf(stderr, "failed to write tmp arc\n"); return 1;
     }
-    gc_arc_close(arc); free(buf);
-    if (!found_file) { fprintf(stderr, "no file entries found\n"); return 1; }
-    return 0;
-}
-
-static int test_open_from_mem(void) {
-    unsigned char* buf = NULL;
-    size_t sz = 0;
-    if (build_minimal_rarc(&buf, &sz) != 0) {
-        fprintf(stderr, "build_minimal_rarc failed\n");
-        return 1;
+    MKDIR_ONE(EXTRACT_DIR);
+    SiphonError err = siphon_arc_extract(TMP_ARC, EXTRACT_DIR, silent_log, NULL);
+    if (err != SIPHON_OK) {
+        fprintf(stderr, "arc_extract returned %d\n", err); return 1;
     }
-    GCArc* arc = gc_arc_open_mem(buf, sz);
-    if (!arc) { free(buf); fprintf(stderr, "open failed\n"); return 1; }
-    int n = gc_arc_entry_count(arc);
-    if (n < 2) {
-        fprintf(stderr, "entry_count=%d, expected >=2\n", n);
-        gc_arc_close(arc); free(buf); return 1;
-    }
-    gc_arc_close(arc);
-    free(buf);
-    return 0;
-}
-
-static int load_file(const char* path, unsigned char** out, size_t* out_size) {
-    FILE* f = fopen(path, "rb");
-    if (!f) return -1;
-    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    if (sz <= 0) { fclose(f); return -1; }
-    unsigned char* buf = (unsigned char*)malloc((size_t)sz);
-    if (!buf) { fclose(f); return -1; }
-    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); return -1; }
-    fclose(f);
-    *out = buf; *out_size = (size_t)sz;
     return 0;
 }
 
 static int test_extract_all(void) {
-    unsigned char* buf = NULL; size_t sz = 0;
-    if (load_file("test/fixtures/minimal.arc", &buf, &sz) != 0) {
-        fprintf(stderr, "fixture minimal.arc not found\n");
-        return 1;
+    if (!file_exists(FIXTURE_ARC)) {
+        fprintf(stderr, "fixture %s not found\n", FIXTURE_ARC); return 1;
     }
-    GCArc* arc = gc_arc_open_mem(buf, sz);
-    if (!arc) { free(buf); fprintf(stderr, "open failed\n"); return 1; }
-
-    const char* outdir = "test/out";
-    MKDIR_ONE("test"); MKDIR_ONE(outdir);
-
-    int rc = gc_arc_extract_all(arc, outdir);
-    gc_arc_close(arc); free(buf);
-    if (rc != 0) { fprintf(stderr, "extract_all returned %d\n", rc); return 1; }
-
-    unsigned char* got = NULL; size_t got_sz = 0;
-    if (load_file("test/out/tex/sw_rope.bti", &got, &got_sz) != 0) {
-        fprintf(stderr, "tex/sw_rope.bti not extracted\n");
-        return 1;
+    MKDIR_ONE(EXTRACT_DIR);
+    SiphonError err = siphon_arc_extract(FIXTURE_ARC, EXTRACT_DIR, silent_log, NULL);
+    if (err != SIPHON_OK) {
+        fprintf(stderr, "arc_extract returned %d\n", err); return 1;
     }
-    if (got_sz != 160) {
-        fprintf(stderr, "extracted size %zu, expected 160\n", got_sz);
-        free(got); return 1;
+    if (!file_exists("test/out/rarc/tex/sw_rope.bti")) {
+        fprintf(stderr, "tex/sw_rope.bti not extracted\n"); return 1;
     }
-    free(got);
+    if (file_size("test/out/rarc/tex/sw_rope.bti") != 160) {
+        fprintf(stderr, "sw_rope.bti wrong size\n"); return 1;
+    }
+    return 0;
+}
+
+static int test_list_ok(void) {
+    if (!file_exists(FIXTURE_ARC)) {
+        fprintf(stderr, "fixture %s not found\n", FIXTURE_ARC); return 1;
+    }
+    LogCapture lc = {0};
+    SiphonError err = siphon_arc_list(FIXTURE_ARC, capture_log, &lc);
+    if (err != SIPHON_OK) {
+        fprintf(stderr, "arc_list returned %d\n", err); return 1;
+    }
+    if (lc.len == 0) {
+        fprintf(stderr, "arc_list produced no output\n"); return 1;
+    }
+    return 0;
+}
+
+static int test_list_contains_known_file(void) {
+    if (!file_exists(FIXTURE_ARC)) {
+        fprintf(stderr, "fixture %s not found\n", FIXTURE_ARC); return 1;
+    }
+    LogCapture lc = {0};
+    siphon_arc_list(FIXTURE_ARC, capture_log, &lc);
+    if (!strstr(lc.buf, "sw_rope.bti")) {
+        fprintf(stderr, "arc_list output missing 'sw_rope.bti'\n"); return 1;
+    }
+    return 0;
+}
+
+static int test_copy_single_file(void) {
+    if (!file_exists(FIXTURE_ARC)) {
+        fprintf(stderr, "fixture %s not found\n", FIXTURE_ARC); return 1;
+    }
+    MKDIR_ONE("test/out"); MKDIR_ONE("test/out/rarc_copy");
+    SiphonError err = siphon_arc_copy(
+        FIXTURE_ARC, FIXTURE_INNER, COPY_OUT, silent_log, NULL
+    );
+    if (err != SIPHON_OK) {
+        fprintf(stderr, "arc_copy returned %d\n", err); return 1;
+    }
+    if (!file_exists(COPY_OUT)) {
+        fprintf(stderr, "%s not created\n", COPY_OUT); return 1;
+    }
+    if (file_size(COPY_OUT) != 160) {
+        fprintf(stderr, "copied file wrong size\n"); return 1;
+    }
+    return 0;
+}
+
+static int test_copy_missing_inner(void) {
+    if (!file_exists(FIXTURE_ARC)) {
+        fprintf(stderr, "fixture %s not found\n", FIXTURE_ARC); return 1;
+    }
+    SiphonError err = siphon_arc_copy(
+        FIXTURE_ARC, "does/not/exist.bin", COPY_OUT, silent_log, NULL
+    );
+    if (err != SIPHON_ERR_NOT_FOUND) {
+        fprintf(stderr, "expected SIPHON_ERR_NOT_FOUND, got %d\n", err); return 1;
+    }
+    return 0;
+}
+
+static int test_bad_file(void) {
+    SiphonError err = siphon_arc_extract(
+        "test/fixtures/mock/garbage.bin", EXTRACT_DIR, silent_log, NULL
+    );
+    if (err == SIPHON_OK) {
+        fprintf(stderr, "bad file accepted as SIPHON_OK\n"); return 1;
+    }
     return 0;
 }
 
 int main(void) {
     int failures = 0;
-    if (test_open_from_mem() != 0) { failures++; fprintf(stderr, "FAIL test_open_from_mem\n"); }
-    if (test_walk_entries() != 0) { failures++; fprintf(stderr, "FAIL test_walk_entries\n"); }
-    if (test_extract_all() != 0) { failures++; fprintf(stderr, "FAIL test_extract_all\n"); }
+
+#define RUN(t) do { \
+    if ((t)() != 0) { failures++; fprintf(stderr, "FAIL " #t "\n"); } \
+} while (0)
+
+    RUN(test_extract_ok);
+    RUN(test_extract_all);
+    RUN(test_list_ok);
+    RUN(test_list_contains_known_file);
+    RUN(test_copy_single_file);
+    RUN(test_copy_missing_inner);
+    RUN(test_bad_file);
+
+#undef RUN
+
     if (failures == 0) printf("all tests passed\n");
     return failures;
 }
