@@ -7,12 +7,13 @@
 #define WII_CLUSTER       0x8000u
 #define WII_CLUSTER_HASH  0x0400u
 #define WII_CLUSTER_DATA  0x7C00u
+#define WII_MAX_PARTITIONS 64
 
 typedef struct {
     gc_read_fn raw;
     uint32_t   dataStart;
-    uint32_t   dataSize;
     uint8_t    titleKey[16];
+    uint8_t    clusterEnc[WII_CLUSTER];
     uint8_t    clusterPlain[WII_CLUSTER_DATA];
     uint32_t   cachedCluster;
 } WiiCtx;
@@ -56,7 +57,6 @@ static void wii_decrypt_title_key(const uint8_t* ticket, uint8_t out[16]) {
 static int wii_read(GCDisc* disc, uint32_t offset, void* buf, size_t size) {
     WiiCtx* w = (WiiCtx*)disc->wii;
     uint8_t* out = (uint8_t*)buf;
-    uint8_t  enc[WII_CLUSTER];
 
     while (size > 0) {
         uint32_t cluster = offset / WII_CLUSTER_DATA;
@@ -64,10 +64,10 @@ static int wii_read(GCDisc* disc, uint32_t offset, void* buf, size_t size) {
 
         if (w->cachedCluster != cluster) {
             uint32_t phys = w->dataStart + cluster * WII_CLUSTER;
-            if (w->raw(disc, phys, enc, WII_CLUSTER) < 0) return -1;
+            if (w->raw(disc, phys, w->clusterEnc, WII_CLUSTER) < 0) return -1;
             uint8_t iv[16];
-            memcpy(iv, enc + 0x3D0, 16);
-            memcpy(w->clusterPlain, enc + WII_CLUSTER_HASH, WII_CLUSTER_DATA);
+            memcpy(iv, w->clusterEnc + 0x3D0, 16);
+            memcpy(w->clusterPlain, w->clusterEnc + WII_CLUSTER_HASH, WII_CLUSTER_DATA);
             struct AES_ctx ctx;
             AES_init_ctx_iv(&ctx, w->titleKey, iv);
             AES_CBC_decrypt_buffer(&ctx, w->clusterPlain, WII_CLUSTER_DATA);
@@ -100,7 +100,7 @@ int gc_wii_wrap(GCDisc* disc) {
     for (int g = 0; g < 4 && !found; g++) {
         uint32_t count   = gc_be32(grp + g*8 + 0);
         uint32_t infoOff = gc_be32(grp + g*8 + 4) << 2;
-        if (count > 64) continue;
+        if (count > WII_MAX_PARTITIONS) continue;
         for (uint32_t p = 0; p < count; p++) {
             uint8_t pe[8];
             if (disc->read(disc, infoOff + p*8, pe, 8) < 0) return -1;
@@ -121,7 +121,6 @@ int gc_wii_wrap(GCDisc* disc) {
     uint8_t phdr[0x1C];
     if (disc->read(disc, partOff + 0x2A4, phdr, sizeof(phdr)) < 0) { free(w); return -1; }
     uint32_t dataOff = gc_be32(phdr + 0x14) << 2;
-    w->dataSize      = gc_be32(phdr + 0x18) << 2;
     w->dataStart     = partOff + dataOff;
     w->cachedCluster = UINT32_MAX;
     w->raw           = disc->read;
