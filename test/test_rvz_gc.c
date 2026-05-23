@@ -3,10 +3,10 @@
 
 int main(void) {
     DiscTestConfig cfg = {
-        .fixture              = SIPHON_TEST_ROOT "/test/fixtures/disc/gc/game.iso",
-        .extract_dir          = SIPHON_TEST_ROOT "/test/out/iso",
-        .expected_format      = "ISO",
-        .expected_game_id     = "TERRIF",
+        .fixture              = SIPHON_TEST_ROOT "/test/fixtures/mock/gc/game.ciso",
+        .extract_dir          = SIPHON_TEST_ROOT "/test/out/ciso",
+        .expected_format      = "CISO",
+        .expected_game_id     = "SIPHON",
         .expected_entry_count = 1,
     };
 
