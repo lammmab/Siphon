@@ -20,6 +20,11 @@ target_link_libraries(test_lzma PRIVATE siphon)
 target_include_directories(test_lzma PRIVATE ${CMAKE_SOURCE_DIR}/src/disc)
 add_test(NAME test_lzma COMMAND test_lzma)
 
+add_executable(test_disc_local test_disc_local.c)
+target_link_libraries(test_disc_local PRIVATE siphon)
+add_test(NAME test_disc_local COMMAND test_disc_local)
+set_tests_properties(test_disc_local PROPERTIES SKIP_RETURN_CODE 77)
+
 macro(add_disc_test name)
     add_executable(test_${name} test_${name}.c test_disc_common.c)
     target_link_libraries(test_${name} PRIVATE siphon)
