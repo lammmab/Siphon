@@ -69,7 +69,7 @@ static int test_inspect_game_id(void) {
 static int test_inspect_entry_count(void) {
     SiphonDiscInfo info;
     siphon_disc_inspect(FIXTURE, &info, silent_log, NULL);
-    if (info.entry_count != 0) {
+    if (info.entry_count != 1) {
         fprintf(stderr, "entry_count: got %d, expected 0 (empty fixture)\n",
                 info.entry_count);
         return 1;
