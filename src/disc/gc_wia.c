@@ -1,6 +1,7 @@
 #include "gc_disc_internal.h"
 #include "siphon_log.h"
 #include "gc_rvz.h"
+#include "lzma.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -35,6 +36,7 @@ typedef struct {
     int       isRVZ;
     uint32_t  compType;
     uint32_t  chunkSize;
+    uint8_t   comprData[7];
     uint8_t   discHeader[0x80];
 
     uint32_t  numRawData;
@@ -50,9 +52,19 @@ typedef struct {
 
     uint8_t*  packedScratch;
     size_t    packedScratchCap;
+
+    int       isWii;
+    uint32_t  sectorsPerGroup;
+    uint32_t  exceptLists;
+    uint32_t  pd0Sectors, pd0Group;
+    uint32_t  pd1Sectors, pd1Group;
 } WIAData;
 
-static int wia_decompress_buf(uint32_t compType, const uint8_t* src, size_t srcLen,
+static void* lzma_alloc(ISzAllocPtr p, size_t size) { (void)p; return malloc(size); }
+static void  lzma_free(ISzAllocPtr p, void* a)       { (void)p; free(a); }
+
+static int wia_decompress_buf(uint32_t compType, const uint8_t* props,
+                              const uint8_t* src, size_t srcLen,
                               uint8_t* dst, size_t dstCap, size_t* outLen) {
     switch (compType) {
         case WIA_COMP_NONE:
@@ -60,6 +72,17 @@ static int wia_decompress_buf(uint32_t compType, const uint8_t* src, size_t srcL
             memcpy(dst, src, srcLen);
             *outLen = srcLen;
             return 0;
+
+        case WIA_COMP_LZMA: {
+            ISzAlloc alloc = { lzma_alloc, lzma_free };
+            SizeT destLen = dstCap;
+            SizeT srcN = srcLen;
+            ELzmaStatus status;
+            if (LzmaDecode(dst, &destLen, src, &srcN, props, LZMA_PROPS_SIZE,
+                           LZMA_FINISH_ANY, &status, &alloc) != SZ_OK) return -1;
+            *outLen = destLen;
+            return 0;
+        }
 
 #if HAS_ZSTD
         case WIA_COMP_ZSTD: {
@@ -74,7 +97,7 @@ static int wia_decompress_buf(uint32_t compType, const uint8_t* src, size_t srcL
     }
 }
 
-static int wia_read_and_decompress(FILE* f, uint32_t compType,
+static int wia_read_and_decompress(FILE* f, uint32_t compType, const uint8_t* props,
                                    uint64_t fileOff, uint32_t compSize,
                                    uint8_t* dst, size_t dstCap, size_t* outLen) {
     if (compType == WIA_COMP_NONE) {
@@ -90,7 +113,7 @@ static int wia_read_and_decompress(FILE* f, uint32_t compType,
     if (fseek(f, (long)fileOff, SEEK_SET) != 0) { free(compBuf); return -1; }
     if (fread(compBuf, 1, compSize, f) != compSize) { free(compBuf); return -1; }
 
-    int ret = wia_decompress_buf(compType, compBuf, compSize, dst, dstCap, outLen);
+    int ret = wia_decompress_buf(compType, props, compBuf, compSize, dst, dstCap, outLen);
     free(compBuf);
     return ret;
 }
@@ -119,7 +142,7 @@ static int wia_decompress_group(GCDisc* disc, WIAData* wd, uint32_t groupIdx,
     uint32_t effCompType = isCompressed ? wd->compType : WIA_COMP_NONE;
 
     size_t outLen = 0;
-    if (wia_read_and_decompress(disc->file, effCompType,
+    if (wia_read_and_decompress(disc->file, effCompType, wd->comprData,
                                 grp->fileOffset, compSize,
                                 wd->decompBuf, wd->decompBufCap, &outLen) < 0) {
         return -1;
@@ -222,6 +245,62 @@ static int wia_read(GCDisc* disc, uint32_t offset, void* buf, size_t size) {
     return 0;
 }
 
+static int wia_part_read(GCDisc* disc, uint32_t offset, void* buf, size_t size) {
+    WIAData* wd = (WIAData*)disc->formatData;
+    uint8_t* out = (uint8_t*)buf;
+    const uint32_t SD = 0x7C00;
+
+    while (size > 0) {
+        uint32_t sec   = offset / SD;
+        uint32_t intra = offset % SD;
+
+        uint32_t base, grp0;
+        if (sec < wd->pd0Sectors) {
+            base = 0; grp0 = wd->pd0Group;
+        } else if (sec < wd->pd0Sectors + wd->pd1Sectors) {
+            base = wd->pd0Sectors; grp0 = wd->pd1Group;
+        } else {
+            memset(out, 0, size);
+            return 0;
+        }
+
+        uint32_t secInPd = sec - base;
+        uint32_t groupRel = secInPd / wd->sectorsPerGroup;
+        uint32_t group = grp0 + groupRel;
+        uint64_t dataOff = (uint64_t)(base + groupRel * wd->sectorsPerGroup) * SD;
+
+        if (group >= wd->numGroups) { memset(out, 0, size); return 0; }
+        if (wia_decompress_group(disc, wd, group, dataOff) < 0) return -1;
+
+        uint32_t eo = 0;
+        for (uint32_t i = 0; i < wd->exceptLists; i++) {
+            if (eo + 2 > wd->decompBufSize) break;
+            uint32_t ne = ((uint32_t)wd->decompBuf[eo] << 8) | wd->decompBuf[eo + 1];
+            eo += 2 + ne * 22;
+        }
+
+        uint32_t secInGroup = secInPd % wd->sectorsPerGroup;
+        uint32_t srcPos = eo + secInGroup * SD + intra;
+
+        size_t chunk = SD - intra;
+        if (chunk > size) chunk = size;
+
+        if (srcPos + chunk > wd->decompBufSize) {
+            size_t valid = srcPos < wd->decompBufSize ? wd->decompBufSize - srcPos : 0;
+            if (valid > chunk) valid = chunk;
+            if (valid) memcpy(out, wd->decompBuf + srcPos, valid);
+            if (chunk > valid) memset(out + valid, 0, chunk - valid);
+        } else {
+            memcpy(out, wd->decompBuf + srcPos, chunk);
+        }
+
+        out    += chunk;
+        offset += (uint32_t)chunk;
+        size   -= chunk;
+    }
+    return 0;
+}
+
 static void wia_close(GCDisc* disc) {
     WIAData* wd = (WIAData*)disc->formatData;
     if (wd) {
@@ -258,24 +337,24 @@ int gc_wia_open(GCDisc* disc, int isRVZ) {
         free(wd); return -1;
     }
 
+    memcpy(wd->comprData, h2 + 0xD5, 7);
     memcpy(wd->discHeader, h2 + 0x10, 0x80);
 
     if (wd->compType != WIA_COMP_NONE) {
 #if !HAS_ZSTD
         if (wd->compType == WIA_COMP_ZSTD) { free(wd); return -1; }
 #endif
-        if (wd->compType == WIA_COMP_BZIP2 || wd->compType == WIA_COMP_LZMA ||
+        if (wd->compType == WIA_COMP_BZIP2 ||
             wd->compType == WIA_COMP_LZMA2 || wd->compType == WIA_COMP_PURGE) {
             const char* name = "unknown";
             switch (wd->compType) {
                 case WIA_COMP_BZIP2: name = "bzip2"; break;
-                case WIA_COMP_LZMA:  name = "lzma";  break;
                 case WIA_COMP_LZMA2: name = "lzma2"; break;
                 case WIA_COMP_PURGE: name = "purge"; break;
             }
             fprintf(stderr,
                 "siphon: %s compression is not supported in this build "
-                "(only NONE and ZSTD are implemented). Re-encode the image to "
+                "(only NONE, ZSTD, and LZMA are implemented). Re-encode the image to "
                 "zstd with Dolphin if you need to extract it.",
                 name);
             free(wd);
@@ -295,7 +374,7 @@ int gc_wia_open(GCDisc* disc, int isRVZ) {
     if (!rawBuf) { free(wd); return -1; }
 
     size_t rawOutLen = 0;
-    if (wia_read_and_decompress(disc->file, wd->compType, rawOff, rawSize,
+    if (wia_read_and_decompress(disc->file, wd->compType, wd->comprData, rawOff, rawSize,
                                 rawBuf, rawBufSize, &rawOutLen) < 0) {
         free(rawBuf); free(wd); return -1;
     }
@@ -322,7 +401,7 @@ int gc_wia_open(GCDisc* disc, int isRVZ) {
     if (!grpBuf) { wia_close(disc); return -1; }
 
     size_t grpOutLen = 0;
-    if (wia_read_and_decompress(disc->file, wd->compType, grpOff, grpSize,
+    if (wia_read_and_decompress(disc->file, wd->compType, wd->comprData, grpOff, grpSize,
                                 grpBuf, grpBufSize, &grpOutLen) < 0) {
         free(grpBuf); wia_close(disc); return -1;
     }
@@ -344,9 +423,31 @@ int gc_wia_open(GCDisc* disc, int isRVZ) {
     wd->decompBuf = (uint8_t*)malloc(wd->decompBufCap);
     if (!wd->decompBuf) { wia_close(disc); return -1; }
 
+    wd->isWii = (gc_be32(h2 + 0x00) == 2);
+
     disc->formatData = wd;
-    disc->read  = wia_read;
     disc->close = wia_close;
+    disc->read  = wia_read;
+
+    if (wd->isWii) {
+        uint32_t nPart = gc_be32(h2 + 0x90);
+        uint64_t partOff = gc_be64(h2 + 0x98);
+        if (nPart < 1) { wia_close(disc); return -1; }
+        uint8_t pe[0x30];
+        if (fseek(disc->file, (long)partOff, SEEK_SET) != 0 ||
+            fread(pe, 1, sizeof(pe), disc->file) != sizeof(pe)) {
+            wia_close(disc); return -1;
+        }
+        wd->pd0Sectors = gc_be32(pe + 0x14);
+        wd->pd0Group   = gc_be32(pe + 0x18);
+        wd->pd1Sectors = gc_be32(pe + 0x24);
+        wd->pd1Group   = gc_be32(pe + 0x28);
+        wd->sectorsPerGroup = wd->chunkSize / 0x8000;
+        wd->exceptLists = wd->chunkSize / 0x200000;
+        if (wd->exceptLists == 0) wd->exceptLists = 1;
+        disc->read = wia_part_read;
+        disc->offsetShift = 2;
+    }
 
     return gc_disc_parse_fst(disc);
 }

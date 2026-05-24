@@ -31,6 +31,9 @@ struct GCDisc {
 
     GCEntry* entries;
     char*    pathBuf;
+
+    uint32_t offsetShift;
+    void*    wii;
 };
 
 static inline uint16_t gc_be16(const uint8_t* p) {
@@ -57,5 +60,7 @@ int gc_ciso_open(GCDisc* disc);
 int gc_gcz_open(GCDisc* disc);
 int gc_wbfs_open(GCDisc* disc);
 int gc_wia_open(GCDisc* disc, int isRVZ);
+int gc_wii_wrap(GCDisc* disc);
+void gc_wii_free(GCDisc* disc);
 
 #endif

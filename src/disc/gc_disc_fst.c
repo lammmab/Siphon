@@ -30,14 +30,15 @@ static void mkdirs(const char* path) {
 }
 
 int gc_disc_parse_fst(GCDisc* disc) {
+    if (gc_wii_wrap(disc) != 0) return -1;
     if (disc->read(disc, 0, disc->boot, 0x440) < 0) return -1;
 
     memcpy(disc->gameId, disc->boot, 6);
     disc->gameId[6] = '\0';
 
-    disc->dolOffset = gc_be32(disc->boot + 0x420);
-    disc->fstOffset = gc_be32(disc->boot + 0x424);
-    disc->fstSize   = gc_be32(disc->boot + 0x428);
+    disc->dolOffset = gc_be32(disc->boot + 0x420) << disc->offsetShift;
+    disc->fstOffset = gc_be32(disc->boot + 0x424) << disc->offsetShift;
+    disc->fstSize   = gc_be32(disc->boot + 0x428) << disc->offsetShift;
 
     if (disc->read(disc, 0x440, disc->bi2, 0x2000) < 0) return -1;
 
@@ -128,7 +129,7 @@ int gc_disc_parse_fst(GCDisc* disc) {
         *pathWrite++ = '\0';
 
         disc->entries[i].name = pathStart;
-        disc->entries[i].discOffset = gc_be32(e + 4);
+        disc->entries[i].discOffset = gc_be32(e + 4) << disc->offsetShift;
         disc->entries[i].size = gc_be32(e + 8);
 
         if (e[0]) {
